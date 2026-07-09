@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import tables as tb
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from invisible_cities.cities.components import baseline_subtractor
@@ -15,10 +16,15 @@ from invisible_cities.cities.components import build_pmap_dual_gain
 from invisible_cities.cities.components import fourier_filter
 from invisible_cities.cities.components import calibrate_fibers_hg
 from invisible_cities.cities.components import calibrate_fibers_lg
+from invisible_cities.cities.components import get_actual_sipm_thr
 from invisible_cities.cities.components import zero_suppress_wfs_hg
 from invisible_cities.cities.components import zero_suppress_wfs_lg
+from invisible_cities.calib.calib_sensors_functions import subtract_baseline_and_calibrate
+from invisible_cities.database import load_db
 from invisible_cities.core import system_of_units as units
 from invisible_cities.core.configure import read_config_file
+from invisible_cities.types.symbols import BlsMode
+from invisible_cities.types.symbols import SiPMThreshold
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 os.environ.setdefault("ICTDIR", str(ROOT_DIR))
@@ -487,7 +493,16 @@ def get_s2_windows_us(pmap_evt, s2_selected, t_us, fiber_samp_wid_ns):
     return windows
 
 
-def sipm_s2_charge_map_figure(sipm_wf_evt, sipm_sensors, positions_by_elecid, s2_windows_us, sipm_samp_wid_us):
+def sipm_s2_charge_map_figure(
+    sipm_wf_evt,
+    sipm_sensors,
+    positions_by_elecid,
+    s2_windows_us,
+    sipm_samp_wid_us,
+    sipm_thr,
+    detector_db,
+    run_number,
+):
     if not s2_windows_us:
         return None, 0
 
@@ -505,49 +520,194 @@ def sipm_s2_charge_map_figure(sipm_wf_evt, sipm_sensors, positions_by_elecid, s2
     corrected = np.where(corrected > 0, corrected, 0.0)
     q = np.sum(corrected[:, mask], axis=1) * float(sipm_samp_wid_us)
 
-    x_vals, y_vals, q_vals, labels = [], [], [], []
+    x_vals, y_vals, q_vals, amp_vals, labels, sensor_indices = [], [], [], [], [], []
     for i in range(len(sipm_sensors)):
         elecid = int(sipm_sensors[i]["channel"])
         if elecid not in positions_by_elecid:
             continue
+        try:
+            adc_to_pes = get_sipm_adc_to_pes(detector_db, run_number, elecid)
+        except KeyError:
+            continue
+        calibrated = subtract_baseline_and_calibrate(
+            sipm_wf_evt[i][np.newaxis, :],
+            np.asarray([adc_to_pes], dtype=float),
+            bls_mode=BlsMode.mean,
+        )[0]
+        calibrated = np.where(calibrated > 0, calibrated, 0.0)
         x, y = positions_by_elecid[elecid]
         x_vals.append(x)
         y_vals.append(y)
         q_vals.append(float(q[i]))
+        amp_vals.append(float(np.max(calibrated[mask])))
         labels.append(elecid)
+        sensor_indices.append(i)
 
     if not x_vals:
         return None, 0
 
-    fig = go.Figure()
+    q_vals = np.asarray(q_vals, dtype=float)
+    amp_vals = np.asarray(amp_vals, dtype=float)
+    selected_mask = amp_vals >= float(sipm_thr)
+    masked_x = np.asarray(x_vals, dtype=float)[selected_mask]
+    masked_y = np.asarray(y_vals, dtype=float)[selected_mask]
+    masked_q = q_vals[selected_mask]
+    masked_labels = np.asarray(labels, dtype=int)[selected_mask]
+    masked_sensor_indices = np.asarray(sensor_indices, dtype=int)[selected_mask]
+
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("All mapped SiPMs", "SiPMs passing threshold selection"),
+        horizontal_spacing=0.08,
+    )
+    base_trace = go.Scatter(
+        x=x_vals,
+        y=y_vals,
+        mode="markers",
+        marker=dict(
+            size=10,
+            color=q_vals,
+            colorscale="Turbo",
+            colorbar=dict(title="Integrated charge"),
+            line=dict(color="black", width=0.4),
+        ),
+        text=[f"ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(labels, q_vals)],
+        customdata=np.asarray(sensor_indices, dtype=int),
+        hovertemplate="%{text}<extra></extra>",
+    )
+    fig.add_trace(base_trace, row=1, col=1)
+
     fig.add_trace(
         go.Scatter(
-            x=x_vals,
-            y=y_vals,
+            x=masked_x,
+            y=masked_y,
             mode="markers",
             marker=dict(
                 size=10,
-                color=q_vals,
+                color=masked_q,
                 colorscale="Turbo",
-                colorbar=dict(title="Integrated charge"),
+                showscale=False,
                 line=dict(color="black", width=0.4),
             ),
-            text=[f"ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(labels, q_vals)],
+            text=[f"ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(masked_labels, masked_q)],
+            customdata=masked_sensor_indices,
             hovertemplate="%{text}<extra></extra>",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
         )
-    )
     fig.update_layout(
         title="SiPM integrated charge in S2 valid window(s)",
-        xaxis_title="X",
-        yaxis_title="Y",
-        yaxis_scaleanchor="x",
         template="plotly_white",
         paper_bgcolor="white",
         plot_bgcolor="white",
         height=520,
         font=dict(color="black"),
     )
+    fig.update_xaxes(title_text="X", row=1, col=1)
+    fig.update_yaxes(title_text="Y", row=1, col=1, scaleanchor="x")
+    fig.update_xaxes(title_text="X", row=1, col=2)
+    fig.update_yaxes(title_text="Y", row=1, col=2, scaleanchor="x2")
     return fig, len(x_vals)
+
+
+def sipm_waveform_figure(
+    sipm_wf_evt,
+    sensor_idx,
+    elecid,
+    thr_sipm_s2,
+    sipm_samp_wid_us,
+    detector_db,
+    run_number,
+    pmap_windows_us=None,
+):
+    raw = np.asarray(sipm_wf_evt[sensor_idx], dtype=float)
+    n_samples = raw.size
+    t_us = np.arange(n_samples, dtype=float) * float(sipm_samp_wid_us)
+
+    adc_to_pes = get_sipm_adc_to_pes(detector_db, run_number, elecid)
+    calibrated = subtract_baseline_and_calibrate(
+        raw[np.newaxis, :],
+        np.asarray([adc_to_pes], dtype=float),
+        bls_mode=BlsMode.mean,
+    )[0]
+    sipm_thr = get_actual_sipm_thr(SiPMThreshold.common, float(thr_sipm_s2), detector_db, run_number)
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08)
+    fig.add_trace(
+        go.Scatter(x=t_us, y=raw, mode="lines", name="raw ADC", line=dict(width=1.2)),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=t_us, y=calibrated, mode="lines", name="calibrated (pes)", line=dict(width=1.2)),
+        row=2,
+        col=1,
+    )
+    fig.add_hline(y=float(sipm_thr), line_dash="dash", line_color="#d94a4a", row=2, col=1)
+    if pmap_windows_us:
+        for t0, t1 in pmap_windows_us:
+            fig.add_vrect(
+                x0=float(t0),
+                x1=float(t1),
+                fillcolor="#1f77b4",
+                opacity=0.16,
+                line_width=0,
+                row=2,
+                col=1,
+            )
+    fig.update_layout(
+        title=f"Selected SiPM waveform: ElecID {elecid}",
+        height=620,
+        template="plotly_white",
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(color="black"),
+        legend=dict(orientation="h"),
+    )
+    fig.update_xaxes(title_text="Time (us)", row=2, col=1)
+    fig.update_yaxes(title_text="ADC", row=1, col=1)
+    fig.update_yaxes(title_text="pes", row=2, col=1)
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def get_sipm_adc_to_pes(detector_db: str, run_number: int, elecid: int) -> float:
+    datasipm = load_db.DataSiPM(detector_db, run_number)
+    row = datasipm.loc[datasipm.ChannelID == elecid]
+    if row.empty:
+        raise KeyError(f"SiPM ElecID {elecid} not found in DataSiPM for {detector_db}, run {run_number}")
+    return float(abs(row.adc_to_pes.iloc[0]))
+
+
+def get_selected_sipm_index(selection_state):
+    if not selection_state:
+        return None
+
+    if isinstance(selection_state, dict):
+        selected_points = selection_state.get("points", [])
+    else:
+        selected_points = getattr(selection_state, "points", [])
+
+    if not selected_points:
+        return None
+
+    point = selected_points[0]
+    if isinstance(point, dict):
+        customdata = point.get("customdata")
+        point_index = point.get("point_index")
+    else:
+        customdata = getattr(point, "customdata", None)
+        point_index = getattr(point, "point_index", None)
+
+    if customdata is not None:
+        if isinstance(customdata, (list, tuple, np.ndarray)) and len(customdata) > 0:
+            return int(customdata[0])
+        return int(customdata)
+
+    return int(point_index) if point_index is not None else None
 
 
 def overlay_plot(t_us, a, b, title, name_a, name_b, y_title):
@@ -728,9 +888,13 @@ def main():
         s2_rebin_stride = sidebar_labeled_number_input("s2_rebin_stride", min_value=1, max_value=100000, value=S2_REBIN_STRIDE_DEFAULT, step=1)
 
         st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
-        st.subheader("PMAP sampling")
+        st.subheader("SiPM selection")
         st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
         thr_sipm_s2 = sidebar_labeled_number_input("thr_sipm_s2 (pes)", min_value=0.0, max_value=1e6, value=THR_SIPM_S2_DEFAULT, step=0.1)
+
+        st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
+        st.subheader("PMAP sampling")
+        st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
         pmt_samp_wid_ns = sidebar_labeled_number_input("pmt_samp_wid (ns)", min_value=1.0, max_value=1000.0, value=PMT_SAMP_WID_NS_DEFAULT, step=1.0)
         fiber_samp_wid = sidebar_labeled_number_input("FIBER_SAMP_WID (ns)", min_value=1.0, max_value=1000.0, value=FIBER_SAMP_WID_NS_DEFAULT, step=1.0)
         sipm_samp_wid_us = sidebar_labeled_number_input("sipm_samp_wid (us)", min_value=0.1, max_value=1000.0, value=SIPM_SAMP_WID_US_DEFAULT, step=0.1)
@@ -859,12 +1023,16 @@ def main():
             stage_a_s2_md = build_stage_a_single_markdown("S2", s2_analyzed, n_in_pmap=None, pmap_error=pmap_error)
 
         s2_windows_us = get_s2_windows_us(pmap_evt, s2_selected, t_us, float(fiber_samp_wid))
+        sipm_thr = get_actual_sipm_thr(SiPMThreshold.common, float(thr_sipm_s2), detector_db, run_number)
         sipm_map_fig, sipm_mapped = sipm_s2_charge_map_figure(
             sipm_wf_evt,
             sipm_sensors,
             positions_by_elecid,
             s2_windows_us,
             float(sipm_samp_wid_us),
+            float(sipm_thr),
+            detector_db,
+            int(run_number),
         )
 
     except Exception as exc:
@@ -1014,7 +1182,44 @@ def main():
         st.info("No S2 window available for SiPM integration with current settings.")
     else:
         st.caption(f"Mapped SiPM sensors: {sipm_mapped}")
-        st.plotly_chart(sipm_map_fig, use_container_width=True)
+        sipm_map_event = st.plotly_chart(
+            sipm_map_fig,
+            use_container_width=True,
+            key="sipm_s2_charge_map",
+            on_select="rerun",
+            selection_mode="points",
+        )
+
+        selected_sipm_idx = get_selected_sipm_index(sipm_map_event.selection)
+        if selected_sipm_idx is not None:
+            st.session_state["selected_sipm_idx"] = selected_sipm_idx
+        else:
+            selected_sipm_idx = st.session_state.get("selected_sipm_idx")
+
+        if selected_sipm_idx is not None:
+            selected_sipm_idx = int(selected_sipm_idx)
+            if 0 <= selected_sipm_idx < len(sipm_sensors):
+                selected_elecid = int(sipm_sensors[selected_sipm_idx]["channel"])
+                st.caption(
+                    f"Selected SiPM ElecID {selected_elecid} | sensor index {selected_sipm_idx}"
+                )
+                st.plotly_chart(
+                    sipm_waveform_figure(
+                        sipm_wf_evt,
+                        selected_sipm_idx,
+                        selected_elecid,
+                        float(thr_sipm_s2),
+                        float(sipm_samp_wid_us),
+                        detector_db,
+                        int(run_number),
+                        pmap_windows_us=s2_windows_us,
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.warning("Selected SiPM index is outside the available sensor range.")
+        else:
+            st.info("Click a SiPM marker to show its waveform below.")
 
     with st.expander("Current configuration"):
         st.json(

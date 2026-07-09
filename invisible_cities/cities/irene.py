@@ -134,7 +134,7 @@ def irene( files_in        : OneOrManyFiles
 
         # Define writers...
         write_event_info_   = run_and_event_writer(h5out)
-        write_trigger_info_ = trigger_writer      (h5out, get_number_of_active_fibers(detector_db, run_number))
+        write_trigger_info_ = trigger_writer      (h5out, get_number_of_active_fibers(detector_db, run_number)+2)
        
         # ... and make them sinks
 
