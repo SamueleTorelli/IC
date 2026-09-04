@@ -57,6 +57,14 @@ def medians(wfs): return to_col_vector(median(wfs, axis=1))
 def modes  (wfs): return to_col_vector(mode  (wfs, axis=1))
 
 
+def binnedmodes(wfs, bin_size=64):
+    """Return the mode of each waveform after grouping ADC values in bins."""
+    if int(bin_size) <= 0:
+        raise ValueError("bin_size must be positive")
+    binned_wfs = (wfs // int(bin_size)) * int(bin_size)
+    return modes(binned_wfs)
+
+
 def subtract_baseline(wfs, *, bls_mode=BlsMode.mean):
     """
     Subtract the baseline to all waveforms in the input

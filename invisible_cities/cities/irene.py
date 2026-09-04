@@ -36,7 +36,7 @@ from .  components import fourier_filter
 from .  components import print_every
 from .  components import collect
 from .  components import copy_mc_info
-from .  components import baseline_subtractor
+from .. calib.calib_sensors_functions import means
 from .  components import calibrate_fibers_lg
 from .  components import calibrate_fibers_hg
 from .  components import calibrate_pmts
@@ -83,12 +83,12 @@ def irene( files_in        : OneOrManyFiles
     #### Define data transformations
 
     # Raw WaveForm to Corrected WaveForm
-    fiber_lg_rwf_to_bswf       = fl.map(baseline_subtractor(n_baseline),  
+    fiber_lg_rwf_to_bswf       = fl.map(lambda rwf: -(rwf - means(rwf[:, :n_baseline])),
                               args = "fiber_lg",
                               out  = "bsfiber_lg")
 
     # Raw WaveForm to Corrected WaveForm
-    fiber_hg_rwf_to_bswf       = fl.map(baseline_subtractor(n_baseline),
+    fiber_hg_rwf_to_bswf       = fl.map(lambda rwf: -(rwf - means(rwf[:, :n_baseline])),
                               args = "fiber_hg",
                               out  = "bsfiber_hg")
 

@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from invisible_cities.cities.components import baseline_subtractor
 from invisible_cities.cities.components import build_pmap_dual_gain
 from invisible_cities.cities.components import fourier_filter
 from invisible_cities.cities.components import calibrate_fibers_hg
@@ -20,6 +19,9 @@ from invisible_cities.cities.components import get_actual_sipm_thr
 from invisible_cities.cities.components import zero_suppress_wfs_hg
 from invisible_cities.cities.components import zero_suppress_wfs_lg
 from invisible_cities.calib.calib_sensors_functions import subtract_baseline_and_calibrate
+from invisible_cities.calib.calib_sensors_functions import binnedmodes
+from invisible_cities.calib.calib_sensors_functions import means
+from invisible_cities.calib.calib_sensors_functions import modes
 from invisible_cities.database import load_db
 from invisible_cities.core import system_of_units as units
 from invisible_cities.core.configure import read_config_file
@@ -727,6 +729,96 @@ def overlay_plot(t_us, a, b, title, name_a, name_b, y_title):
     return fig
 
 
+def baseline_diagnostic_plot(t_us, waveform, n_baseline, title, bin_size=None):
+    baseline_n = min(int(n_baseline), len(waveform))
+    baseline_samples = np.asarray(waveform[:baseline_n])
+    if bin_size is None:
+        distribution_samples = baseline_samples
+        baseline_mode = float(means(baseline_samples[np.newaxis, :])[0])
+        baseline_label = "mean"
+        distribution_title = "Distribution of baseline samples; mean marked"
+    else:
+        distribution_samples = (baseline_samples // int(bin_size)) * int(bin_size)
+        baseline_mode = float(means(baseline_samples[np.newaxis, :])[0])
+        baseline_label = "mean"
+        distribution_title = f"Distribution of baseline samples (bin size {int(bin_size)}); mean marked"
+    baseline_times = np.asarray(t_us[:baseline_n])
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.16,
+        subplot_titles=(
+            f"Waveform and baseline window (first {baseline_n} samples)",
+            distribution_title,
+        ),
+    )
+    fig.add_trace(
+        go.Scatter(x=t_us, y=waveform, mode="lines", name="waveform", line=dict(width=1.1)),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=baseline_times,
+            y=baseline_samples,
+            mode="markers",
+            name="baseline samples",
+            marker=dict(size=4, color="#f08c46"),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_vrect(
+        x0=float(baseline_times[0]),
+        x1=float(baseline_times[-1]),
+        fillcolor="#f08c46",
+        opacity=0.14,
+        line_width=0,
+        row=1,
+        col=1,
+    )
+
+    values, counts = np.unique(distribution_samples, return_counts=True)
+    fig.add_trace(
+        go.Bar(
+            x=values,
+            y=counts,
+            name="sample count",
+            marker=dict(color="#17324d", line=dict(color="#0b1f33", width=0.8)),
+            width=int(bin_size) if bin_size is not None else None,
+            hovertemplate="ADC bin=%{x}<br>count=%{y}<extra></extra>",
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_vline(
+        x=baseline_mode,
+        line_dash="dash",
+        line_color="#d94841",
+        annotation_text=f"{baseline_label} = {baseline_mode:g}",
+        annotation_position="top right",
+        row=2,
+        col=1,
+    )
+    fig.update_layout(
+        title=title,
+        height=650,
+        template="plotly_white",
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(color="black"),
+        legend=dict(orientation="h"),
+    )
+    fig.update_xaxes(title_text="Time (us)", row=1, col=1)
+    fig.update_yaxes(title_text="ADC", row=1, col=1)
+    distribution_x_title = "ADC bin lower edge" if bin_size is not None else "ADC value"
+    fig.update_xaxes(title_text=distribution_x_title, row=2, col=1)
+    fig.update_yaxes(title_text="Count", row=2, col=1)
+    return fig
+
+
 def threshold_plot(
     t_us,
     y,
@@ -949,9 +1041,8 @@ def main():
 
         t_us = np.arange(n_samples) * float(fiber_samp_wid) * 1e-3
 
-        subtract_baseline = baseline_subtractor(int(n_baseline))
-        bsfiber_hg = subtract_baseline(fiber_hg_raw)
-        bsfiber_lg = subtract_baseline(fiber_lg_raw)
+        bsfiber_hg = -(fiber_hg_raw - means(fiber_hg_raw[:, :int(n_baseline)]))
+        bsfiber_lg = -(fiber_lg_raw - means(fiber_lg_raw[:, :int(n_baseline)]))
 
         apply_fourier_filter = fourier_filter(float(fiber_samp_wid), float(fiber_cutoff_mhz))
         bsffiber_hg = apply_fourier_filter(bsfiber_hg)
@@ -1066,6 +1157,29 @@ def main():
                 "raw ADC",
                 "baseline-subtracted ADC",
                 "ADC",
+            ),
+            use_container_width=True,
+        )
+
+    col_baseline_hg, col_baseline_lg = st.columns(2)
+    with col_baseline_hg:
+        st.plotly_chart(
+            baseline_diagnostic_plot(
+                t_us,
+                fiber_hg_raw[fiber_ch],
+                int(n_baseline),
+                f"HG baseline diagnostic (mean): channel {fiber_ch}",
+                bin_size=64,
+            ),
+            use_container_width=True,
+        )
+    with col_baseline_lg:
+        st.plotly_chart(
+            baseline_diagnostic_plot(
+                t_us,
+                fiber_lg_raw[fiber_ch],
+                int(n_baseline),
+                f"LG baseline diagnostic (mean): channel {fiber_ch}",
             ),
             use_container_width=True,
         )
