@@ -18,6 +18,7 @@ from invisible_cities.cities.components import calibrate_fibers_lg
 from invisible_cities.cities.components import get_actual_sipm_thr
 from invisible_cities.cities.components import zero_suppress_wfs_hg
 from invisible_cities.cities.components import zero_suppress_wfs_lg
+from invisible_cities.calib.calib_sensors_functions import mask_sensors
 from invisible_cities.calib.calib_sensors_functions import subtract_baseline_and_calibrate
 from invisible_cities.calib.calib_sensors_functions import binnedmodes
 from invisible_cities.calib.calib_sensors_functions import means
@@ -467,6 +468,25 @@ def load_sipm_positions(csv_path: str):
     return out
 
 
+def fiber_channel_exclusion_grid(channel_ids, n_cols=8, default_excluded=None):
+    default_excluded = {int(ch) for ch in (default_excluded or [])}
+
+    for start in range(0, len(channel_ids), n_cols):
+        row = channel_ids[start : start + n_cols]
+        cols = st.columns(len(row))
+        for col, ch in zip(cols, row):
+            key = f"exclude_fiber_channel_{int(ch)}"
+            if key not in st.session_state:
+                st.session_state[key] = int(ch) in default_excluded
+            col.markdown(
+                f"<div style='text-align:center; font-size:0.9rem; font-weight:600; margin-bottom:0.15rem;'>{int(ch)}</div>",
+                unsafe_allow_html=True,
+            )
+            col.checkbox("", key=key, label_visibility="collapsed")
+
+    return [int(ch) for ch in channel_ids if st.session_state.get(f"exclude_fiber_channel_{int(ch)}", False)]
+
+
 def get_s2_windows_us(pmap_evt, s2_selected, t_us, fiber_samp_wid_ns):
     windows = []
 
@@ -504,9 +524,12 @@ def sipm_s2_charge_map_figure(
     sipm_thr,
     detector_db,
     run_number,
+    excluded_channels=None,
 ):
     if not s2_windows_us:
         return None, 0
+
+    excluded_channels = {int(ch) for ch in (excluded_channels or [])}
 
     n_samples = sipm_wf_evt.shape[1]
     t_sipm_us = np.arange(n_samples, dtype=float) * float(sipm_samp_wid_us)
@@ -550,12 +573,29 @@ def sipm_s2_charge_map_figure(
 
     q_vals = np.asarray(q_vals, dtype=float)
     amp_vals = np.asarray(amp_vals, dtype=float)
-    selected_mask = amp_vals >= float(sipm_thr)
+    labels_arr = np.asarray(labels, dtype=int)
+    sensor_indices_arr = np.asarray(sensor_indices, dtype=int)
+    excluded_mask = np.isin(labels_arr, list(excluded_channels))
+    included_mask = ~excluded_mask
+    selected_mask = (amp_vals >= float(sipm_thr)) & included_mask
+
+    included_x = np.asarray(x_vals, dtype=float)[included_mask]
+    included_y = np.asarray(y_vals, dtype=float)[included_mask]
+    included_q = q_vals[included_mask]
+    included_labels = labels_arr[included_mask]
+    included_sensor_indices = sensor_indices_arr[included_mask]
+
+    excluded_x = np.asarray(x_vals, dtype=float)[excluded_mask]
+    excluded_y = np.asarray(y_vals, dtype=float)[excluded_mask]
+    excluded_q = q_vals[excluded_mask]
+    excluded_labels = labels_arr[excluded_mask]
+    excluded_sensor_indices = sensor_indices_arr[excluded_mask]
+
     masked_x = np.asarray(x_vals, dtype=float)[selected_mask]
     masked_y = np.asarray(y_vals, dtype=float)[selected_mask]
     masked_q = q_vals[selected_mask]
-    masked_labels = np.asarray(labels, dtype=int)[selected_mask]
-    masked_sensor_indices = np.asarray(sensor_indices, dtype=int)[selected_mask]
+    masked_labels = labels_arr[selected_mask]
+    masked_sensor_indices = sensor_indices_arr[selected_mask]
 
     fig = make_subplots(
         rows=1,
@@ -563,43 +603,68 @@ def sipm_s2_charge_map_figure(
         subplot_titles=("All mapped SiPMs", "SiPMs passing threshold selection"),
         horizontal_spacing=0.08,
     )
-    base_trace = go.Scatter(
-        x=x_vals,
-        y=y_vals,
-        mode="markers",
-        marker=dict(
-            size=10,
-            color=q_vals,
-            colorscale="Turbo",
-            colorbar=dict(title="Integrated charge"),
-            line=dict(color="black", width=0.4),
-        ),
-        text=[f"ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(labels, q_vals)],
-        customdata=np.asarray(sensor_indices, dtype=int),
-        hovertemplate="%{text}<extra></extra>",
-    )
-    fig.add_trace(base_trace, row=1, col=1)
-
-    fig.add_trace(
-        go.Scatter(
-            x=masked_x,
-            y=masked_y,
+    if included_q.size:
+        base_trace = go.Scatter(
+            x=included_x,
+            y=included_y,
             mode="markers",
             marker=dict(
                 size=10,
-                color=masked_q,
+                color=included_q,
                 colorscale="Turbo",
-                showscale=False,
+                colorbar=dict(title="Integrated charge"),
                 line=dict(color="black", width=0.4),
             ),
-            text=[f"ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(masked_labels, masked_q)],
-            customdata=masked_sensor_indices,
+            text=[f"ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(included_labels, included_q)],
+            customdata=included_sensor_indices,
             hovertemplate="%{text}<extra></extra>",
             showlegend=False,
-        ),
-        row=1,
-        col=2,
         )
+        fig.add_trace(base_trace, row=1, col=1)
+
+    if excluded_q.size:
+        fig.add_trace(
+            go.Scatter(
+                x=excluded_x,
+                y=excluded_y,
+                mode="markers",
+                marker=dict(
+                    size=10,
+                    color="#b8b8b8",
+                    line=dict(color="#666666", width=0.4),
+                    symbol="x",
+                ),
+                text=[f"Excluded ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(excluded_labels, excluded_q)],
+                customdata=excluded_sensor_indices,
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+    if masked_q.size:
+        fig.add_trace(
+            go.Scatter(
+                x=masked_x,
+                y=masked_y,
+                mode="markers",
+                marker=dict(
+                    size=10,
+                    color=masked_q,
+                    colorscale="Turbo",
+                    showscale=False,
+                    line=dict(color="black", width=0.4),
+                ),
+                text=[f"ElecID {eid}<br>Q={qq:.2f}" for eid, qq in zip(masked_labels, masked_q)],
+                customdata=masked_sensor_indices,
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=False,
+            ),
+            row=1,
+            col=2,
+        )
+
     fig.update_layout(
         title="SiPM integrated charge in S2 valid window(s)",
         template="plotly_white",
@@ -612,7 +677,7 @@ def sipm_s2_charge_map_figure(
     fig.update_yaxes(title_text="Y", row=1, col=1, scaleanchor="x")
     fig.update_xaxes(title_text="X", row=1, col=2)
     fig.update_yaxes(title_text="Y", row=1, col=2, scaleanchor="x2")
-    return fig, len(x_vals)
+    return fig, int(np.count_nonzero(included_mask))
 
 
 def sipm_waveform_figure(
@@ -992,6 +1057,15 @@ def main():
         sipm_samp_wid_us = sidebar_labeled_number_input("sipm_samp_wid (us)", min_value=0.1, max_value=1000.0, value=SIPM_SAMP_WID_US_DEFAULT, step=0.1)
 
         st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
+        fiber_channel_options = list(range(min(36, int(n_fibers))))
+        excluded_fiber_channels = fiber_channel_exclusion_grid(
+            fiber_channel_options,
+            n_cols=8,
+            default_excluded=st.session_state.get("excluded_fiber_channels", []),
+        )
+        st.session_state["excluded_fiber_channels"] = excluded_fiber_channels
+
+        st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
         password = st.text_input("Password", type="password", placeholder="Enter password to save")
         if st.button("Save current values to irene.conf", use_container_width=True):
             if not password:
@@ -1044,9 +1118,15 @@ def main():
         bsfiber_hg = -(fiber_hg_raw - means(fiber_hg_raw[:, :int(n_baseline)]))
         bsfiber_lg = -(fiber_lg_raw - means(fiber_lg_raw[:, :int(n_baseline)]))
 
+        fiber_active = np.ones(int(n_fibers), dtype=bool)
+        if excluded_fiber_channels:
+            fiber_active[np.asarray(excluded_fiber_channels, dtype=int)] = False
+        masked_bsfiber_hg = mask_sensors(bsfiber_hg, fiber_active)
+        masked_bsfiber_lg = mask_sensors(bsfiber_lg, fiber_active)
+
         apply_fourier_filter = fourier_filter(float(fiber_samp_wid), float(fiber_cutoff_mhz))
-        bsffiber_hg = apply_fourier_filter(bsfiber_hg)
-        bsffiber_lg = apply_fourier_filter(bsfiber_lg)
+        bsffiber_hg = apply_fourier_filter(masked_bsfiber_hg)
+        bsffiber_lg = apply_fourier_filter(masked_bsfiber_lg)
 
         cal_hg = calibrate_fibers_hg(detector_db, int(run_number), int(n_maw_s1))
         cal_lg = calibrate_fibers_lg(detector_db, int(run_number), int(n_maw_s2))
