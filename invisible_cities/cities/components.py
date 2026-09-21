@@ -459,6 +459,11 @@ def get_pmt_wfs(h5in, wf_type):
     elif wf_type is WfType.mcrd: return h5in.root.   pmtrd
     else                       : raise  TypeError(f"Invalid WfType: {type(wf_type)}")
 
+def get_number_of_pmts(files_in):
+    path = files_in if isinstance(files_in, str) else files_in[0]
+    with tb.open_file(path, "r") as h5in:
+        return get_pmt_wfs(h5in, WfType.rwf).shape[1]
+
 def get_sipm_wfs(h5in, wf_type):
     if   wf_type is WfType.rwf : return h5in.root.RD.sipmrwf
     elif wf_type is WfType.mcrd: return h5in.root.   sipmrd
@@ -1947,7 +1952,7 @@ def get_min_spacing(series: pd.Series) -> float:
 
 
 @check_annotations
-def dbscan_labeller(eps: float = np.sqrt(3), min_samples: int = 4) -> Callable:
+def dbscan_labeller(eps: float = np.sqrt(3)+0.1, min_samples: int = 3) -> Callable:
     try:
         from sklearn.cluster import DBSCAN
     except ImportError as err:
@@ -1958,9 +1963,9 @@ def dbscan_labeller(eps: float = np.sqrt(3), min_samples: int = 4) -> Callable:
         if hits.empty:
             return hits.assign(label=np.array([], dtype=np.int32))
 
-        dx = get_min_spacing(hits.X)
-        dy = get_min_spacing(hits.Y)
-        dz = get_min_spacing(hits.Z)
+        dx = 10.0
+        dy = 10.0
+        dz = 3.3
 
         normalized_coords = np.column_stack((hits.X.values / dx,
                                              hits.Y.values / dy,

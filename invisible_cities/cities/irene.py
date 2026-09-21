@@ -45,6 +45,7 @@ from .  components import zero_suppress_wfs_hg
 from .  components import zero_suppress_wfs_lg
 from .  components import wf_from_files_fibers_dual_gain
 from .  components import get_number_of_active_fibers
+from .  components import get_number_of_pmts
 from .  components import get_number_of_active_pmts
 from .  components import compute_and_write_pmaps_dual_gain
 from .  components import get_actual_sipm_thr
@@ -134,7 +135,8 @@ def irene( files_in        : OneOrManyFiles
 
         # Define writers...
         write_event_info_   = run_and_event_writer(h5out)
-        write_trigger_info_ = trigger_writer      (h5out, get_number_of_active_fibers(detector_db, run_number))
+        write_trigger_info_ = trigger_writer      (h5out, get_number_of_active_fibers(detector_db, run_number)
+                                 + get_number_of_pmts(files_in))
        
         # ... and make them sinks
 
