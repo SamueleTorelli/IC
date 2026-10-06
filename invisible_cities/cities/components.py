@@ -462,6 +462,7 @@ def get_pmt_wfs(h5in, wf_type):
 def get_number_of_pmts(files_in):
     path = files_in if isinstance(files_in, str) else files_in[0]
     with tb.open_file(path, "r") as h5in:
+        if "pmtrwf" not in h5in.root.RD: return 0
         return get_pmt_wfs(h5in, WfType.rwf).shape[1]
 
 def get_sipm_wfs(h5in, wf_type):
