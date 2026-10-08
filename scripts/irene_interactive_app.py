@@ -2,12 +2,14 @@
 import os
 import glob
 import csv
+import re
 import hashlib
 from pathlib import Path
 
 import numpy as np
 import tables as tb
 import plotly.graph_objects as go
+import plotly.colors as px_colors
 from plotly.subplots import make_subplots
 import streamlit as st
 
@@ -16,6 +18,7 @@ from invisible_cities.cities.components import fourier_filter
 from invisible_cities.cities.components import calibrate_fibers_hg
 from invisible_cities.cities.components import calibrate_fibers_lg
 from invisible_cities.cities.components import get_actual_sipm_thr
+from invisible_cities.cities.components import calibrate_sipms
 from invisible_cities.cities.components import zero_suppress_wfs_hg
 from invisible_cities.cities.components import zero_suppress_wfs_lg
 from invisible_cities.calib.calib_sensors_functions import mask_sensors
@@ -28,6 +31,14 @@ from invisible_cities.core import system_of_units as units
 from invisible_cities.core.configure import read_config_file
 from invisible_cities.types.symbols import BlsMode
 from invisible_cities.types.symbols import SiPMThreshold
+from invisible_cities.types.symbols import RebinMethod
+from invisible_cities.types.symbols import SiPMCharge
+from invisible_cities.types.symbols import XYReco
+from invisible_cities.cities.components import compute_xy_position
+from invisible_cities.cities.components import peak_classifier
+from invisible_cities.cities.components import sipms_as_hits
+from invisible_cities.cities.components import hits_merger
+from invisible_cities.cities.components import dbscan_labeller
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 os.environ.setdefault("ICTDIR", str(ROOT_DIR))
@@ -37,6 +48,7 @@ AUTHORIZED_PASSWORD_HASH = "a2242ead55c94c3deb7cf2340bfef9d5bcaca22dfe66e646745e
 
 # Candidate-selection defaults loaded from the Irene config file.
 CONFIG_FILE = ROOT_DIR / "invisible_cities" / "config" / "irene.conf"
+SOPHRONIA_CONFIG_FILE = ROOT_DIR / "invisible_cities" / "config" / "sophronia.conf"
 CFG = read_config_file(str(CONFIG_FILE)) if CONFIG_FILE.exists() else {}
 
 N_BASELINE_DEFAULT = int(CFG.get("n_baseline", 2800))
@@ -673,11 +685,145 @@ def sipm_s2_charge_map_figure(
         height=520,
         font=dict(color="black"),
     )
-    fig.update_xaxes(title_text="X", row=1, col=1)
-    fig.update_yaxes(title_text="Y", row=1, col=1, scaleanchor="x")
-    fig.update_xaxes(title_text="X", row=1, col=2)
-    fig.update_yaxes(title_text="Y", row=1, col=2, scaleanchor="x2")
+    fig.update_xaxes(title_text="X", range=[-150, 150], row=1, col=1)
+    fig.update_yaxes(title_text="Y", range=[-150, 150], row=1, col=1, scaleanchor="x")
+    fig.update_xaxes(title_text="X", range=[-150, 150], row=1, col=2)
+    fig.update_yaxes(title_text="Y", range=[-150, 150], row=1, col=2, scaleanchor="x2")
     return fig, int(np.count_nonzero(included_mask))
+
+
+def write_sophronia_params(file_path, eps, min_samples):
+    """Update only the dbscan_params block in sophronia.conf (eps as float, min_samples as int)."""
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    text = path.read_text()
+    block = f"dbscan_params = dict(\n    eps         = {float(eps)!r},\n    min_samples = {int(min_samples)})"
+    text, n_db = re.subn(r"^dbscan_params\s*=\s*dict\([^)]*\)", lambda m: block, text, flags=re.M)
+    if n_db != 1:
+        raise ValueError("Could not find dbscan_params in sophronia.conf")
+    path.write_text(text)
+
+
+def sipm_wfs_in_db_order(sipm_wf_evt, sipm_sensors, detector_db, run_number):
+    """Reorder file SiPM waveforms (`channel` = DataSiPM SensorID, as in the positions CSV) to DataSiPM row order."""
+    datasipm = load_db.DataSiPM(detector_db, run_number)
+    row_of_elecid = {int(ch): i for i, ch in enumerate(sipm_sensors["channel"])}
+    out = np.zeros((len(datasipm), sipm_wf_evt.shape[1]), dtype=sipm_wf_evt.dtype)
+    for db_row, elecid in enumerate(datasipm.SensorID.values):
+        file_row = row_of_elecid.get(int(elecid))
+        if file_row is not None:
+            out[db_row] = sipm_wf_evt[file_row]
+    return out
+
+
+def sophronia_hits_3d_figure(
+    pmap_evt,
+    detector_db,
+    run_number,
+    drift_v=1 * units.mm / units.mus,
+    rebin_slices=1,
+    q_thr=0.0,
+    dbscan_eps=1.7320508075688772,
+    dbscan_min_samples=4,
+):
+    """Build hits as Sophronia does (sipms_as_hits, NN merge, DBSCAN labels) and plot them in 3D."""
+    if pmap_evt is None or not len(pmap_evt.s2s):
+        return None, "No S2 in PMAP: cannot build hits."
+
+    # Permissive selector (as in sophronia.conf) with default S1/S2 parameters.
+    selector = peak_classifier(
+        s1_nmin=1, s1_nmax=10000, s1_emin=0, s1_emax=1e9, s1_wmin=30 * units.ns,
+        s1_wmax=500 * units.ms, s1_hmin=0, s1_hmax=1e9, s1_ethr=0.5,
+        s2_nmin=1, s2_nmax=10000, s2_emin=0, s2_emax=1e9, s2_wmin=70 * units.ns,
+        s2_wmax=10 * units.ms, s2_hmin=0, s2_hmax=1e9, s2_nsipmmin=0,
+        s2_nsipmmax=10000, s2_ethr=0.5,
+    )
+    selector_output = selector(pmap_evt)
+    if not np.any(selector_output.s2_peaks):
+        return None, "No S2 peak passed the Sophronia peak selection."
+
+    global_reco = compute_xy_position(detector_db, run_number, XYReco.barycenter, Qthr=1)
+    make_hits = sipms_as_hits(
+        detector_db=detector_db,
+        run_number=run_number,
+        drift_v=drift_v,
+        # Parameter names in sipms_as_hits are swapped w.r.t. their use: Sophronia
+        # passes (rebin, rebin_method) positionally, so do the same here.
+        rebin_method=rebin_slices,
+        rebin_slices=RebinMethod.stride,
+        q_thr=q_thr,
+        global_reco=global_reco,
+        charge_type=SiPMCharge.raw,
+    )
+    try:
+        hits = make_hits(pmap_evt, selector_output, 0, 0.0)
+    except ValueError as exc:
+        return None, f"No hits could be built from the PMAP SiPM data ({exc})."
+
+    hits = hits_merger(True)(hits)
+    hits = hits[~np.isnan(hits.Q)] if "Q" in hits else hits
+    hits = hits[hits.Q > 0]
+    if hits.empty:
+        return None, "No valid hits after NN merging."
+    hits = dbscan_labeller(eps=dbscan_eps, min_samples=dbscan_min_samples)(hits)
+
+    x, y = hits.X.values, hits.Y.values
+    z = hits.Z.values - hits.Z.values.min()
+    q = hits.Q.values
+    labels = hits.label.values
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{"type": "scene"}, {"type": "scene"}]],
+        subplot_titles=("Unclustered hits", "DBSCAN clusters"),
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=x, y=y, z=z, mode="markers",
+            marker=dict(size=3, color=q, colorscale="Turbo",
+                        colorbar=dict(title="Q (pes)", x=0.45)),
+            text=[f"Q={v:.2f}" for v in q],
+            hovertemplate="X=%{x:.1f}<br>Y=%{y:.1f}<br>Z=%{z:.1f}<br>%{text}<extra></extra>",
+            showlegend=False,
+        ),
+        row=1, col=1,
+    )
+    palette = (
+        px_colors.qualitative.Plotly + px_colors.qualitative.D3 + px_colors.qualitative.Dark24
+    )
+    for lab in np.unique(labels):
+        m = labels == lab
+        if lab == -1:
+            name, color = "noise", "#9a9a9a"
+        else:
+            name, color = f"cluster {lab}", palette[int(lab) % len(palette)]
+        fig.add_trace(
+            go.Scatter3d(
+                x=x[m], y=y[m], z=z[m], mode="markers",
+                marker=dict(size=3, color=color),
+                name=f"{name} ({int(m.sum())})",
+                hovertemplate="X=%{x:.1f}<br>Y=%{y:.1f}<br>Z=%{z:.1f}<extra>" + name + "</extra>",
+            ),
+            row=1, col=2,
+        )
+    # Fixed XY range; Z is stretched 5x (display only) relative to the true scale, ticks every 1 mm.
+    z_ratio = max(5.0 * float(np.ptp(z)) / 300.0, 1e-3)
+    aspect = dict(x=1.0, y=1.0, z=z_ratio)
+    axes = dict(
+        xaxis=dict(title="X (mm)", range=[-150, 150]),
+        yaxis=dict(title="Y (mm)", range=[-150, 150]),
+        zaxis=dict(title="relative Z (mm)", dtick=1),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=650,
+        scene=dict(**axes, aspectmode="manual", aspectratio=aspect),
+        scene2=dict(**axes, aspectmode="manual", aspectratio=aspect),
+        font=dict(color="black"),
+    )
+    n_clusters = int(len(set(labels.tolist()) - {-1}))
+    return fig, f"{len(hits)} hits | {n_clusters} DBSCAN clusters | {int(np.sum(labels == -1))} noise hits"
 
 
 def sipm_waveform_figure(
@@ -1057,6 +1203,13 @@ def main():
         sipm_samp_wid_us = sidebar_labeled_number_input("sipm_samp_wid (us)", min_value=0.1, max_value=1000.0, value=SIPM_SAMP_WID_US_DEFAULT, step=0.1)
 
         st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
+        st.subheader("DBSCAN (3D view)")
+        st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
+        dbscan_eps = sidebar_labeled_number_input("dbscan eps", min_value=0.01, max_value=100.0, value=1.7320508075688772, step=0.1, format="%.4f")
+        dbscan_min_samples = sidebar_labeled_number_input("dbscan min_samples", min_value=1, max_value=1000, value=4, step=1)
+        sophronia_q_thr = sidebar_labeled_number_input("sophronia q_thr (pes)", min_value=0.0, max_value=1e6, value=1.5, step=0.1)
+
+        st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
         fiber_channel_options = list(range(min(36, int(n_fibers))))
         excluded_fiber_channels = fiber_channel_exclusion_grid(
             fiber_channel_options,
@@ -1101,6 +1254,18 @@ def main():
                 try:
                     write_parameters_to_file(CONFIG_FILE, config_updates)
                     st.success(f"Saved {len(config_updates)} numeric values to {CONFIG_FILE.name}")
+                except Exception as exc:
+                    st.error(f"Failed to save configuration: {exc}")
+
+        if st.button("Save DBSCAN values to sophronia.conf", use_container_width=True):
+            if not password:
+                st.error("Password required to save.")
+            elif hashlib.sha256(password.encode()).hexdigest() != AUTHORIZED_PASSWORD_HASH:
+                st.error("Incorrect password.")
+            else:
+                try:
+                    write_sophronia_params(SOPHRONIA_CONFIG_FILE, float(dbscan_eps), int(dbscan_min_samples))
+                    st.success(f"Saved DBSCAN values to {SOPHRONIA_CONFIG_FILE.name}")
                 except Exception as exc:
                     st.error(f"Failed to save configuration: {exc}")
 
@@ -1160,6 +1325,7 @@ def main():
         )
 
         pmap_evt = None
+        pmap_builder = None
         pmap_error = None
         try:
             pmap_builder = build_pmap_dual_gain(
@@ -1371,7 +1537,38 @@ def main():
             st.markdown("### S2 diagnostics")
             st.markdown(stage_a_s2_md)
 
-    st.subheader("SiPM S2 Charge Map")
+    title_col, button_col = st.columns([6, 1])
+    with title_col:
+        st.subheader("SiPM S2 Charge Map")
+    with button_col:
+        if st.button("3D", key="sipm_3d_button"):
+            st.session_state["show_sipm_3d"] = not st.session_state.get("show_sipm_3d", False)
+        show_3d = st.session_state.get("show_sipm_3d", False)
+    if show_3d:
+        try:
+            if pmap_builder is None:
+                raise RuntimeError("PMAP could not be built")
+            # The PMAP shown above has no SiPM data; Irene fills it with calibrated SiPM waveforms.
+            sipm_cal = calibrate_sipms(detector_db, int(run_number), float(sipm_thr))(
+                sipm_wfs_in_db_order(sipm_wf_evt, sipm_sensors, detector_db, int(run_number))
+            )
+            pmap_3d = pmap_builder(cbsfiber_hg_maw, cbsfiber_lg_maw, s1_indices, s2_indices, sipm_cal)
+            fig3d, info3d = sophronia_hits_3d_figure(
+                pmap_3d,
+                detector_db,
+                int(run_number),
+                rebin_slices=1,
+                q_thr=float(sophronia_q_thr),
+                dbscan_eps=float(dbscan_eps),
+                dbscan_min_samples=int(dbscan_min_samples),
+            )
+        except Exception as exc:
+            fig3d, info3d = None, f"3D reconstruction failed: {exc}"
+        if fig3d is None:
+            st.warning(info3d)
+        else:
+            st.caption(info3d)
+            st.plotly_chart(fig3d, use_container_width=True, key="sipm_3d_plot")
     if sipm_map_fig is None:
         st.info("No S2 window available for SiPM integration with current settings.")
     else:
@@ -1448,6 +1645,9 @@ def main():
                 "thr_sipm_s2": float(thr_sipm_s2),
                 "pmt_samp_wid_ns": float(pmt_samp_wid_ns),
                 "sipm_samp_wid_us": float(sipm_samp_wid_us),
+                "sophronia_q_thr": float(sophronia_q_thr),
+                "dbscan_eps": float(dbscan_eps),
+                "dbscan_min_samples": int(dbscan_min_samples),
             }
         )
 
