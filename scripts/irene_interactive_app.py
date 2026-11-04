@@ -25,6 +25,7 @@ from invisible_cities.calib.calib_sensors_functions import mask_sensors
 from invisible_cities.calib.calib_sensors_functions import subtract_baseline_and_calibrate
 from invisible_cities.calib.calib_sensors_functions import binnedmodes
 from invisible_cities.calib.calib_sensors_functions import means
+from invisible_cities.calib.calib_sensors_functions import subtract_mean_and_zero_suppress
 from invisible_cities.calib.calib_sensors_functions import modes
 from invisible_cities.database import load_db
 from invisible_cities.core import system_of_units as units
@@ -940,19 +941,20 @@ def overlay_plot(t_us, a, b, title, name_a, name_b, y_title):
     return fig
 
 
-def baseline_diagnostic_plot(t_us, waveform, n_baseline, title, bin_size=None):
+def baseline_diagnostic_plot(t_us, waveform, n_baseline, title, bin_size=None, n_rms=None):
     baseline_n = min(int(n_baseline), len(waveform))
     baseline_samples = np.asarray(waveform[:baseline_n])
+    baseline_mode = float(means(baseline_samples[np.newaxis, :])[0])
+    baseline_rms = float(np.sqrt(np.mean((baseline_samples - baseline_mode) ** 2)))
+    baseline_label = "mean"
     if bin_size is None:
         distribution_samples = baseline_samples
-        baseline_mode = float(means(baseline_samples[np.newaxis, :])[0])
-        baseline_label = "mean"
         distribution_title = "Distribution of baseline samples; mean marked"
     else:
         distribution_samples = (baseline_samples // int(bin_size)) * int(bin_size)
-        baseline_mode = float(means(baseline_samples[np.newaxis, :])[0])
-        baseline_label = "mean"
         distribution_title = f"Distribution of baseline samples (bin size {int(bin_size)}); mean marked"
+    if n_rms is not None:
+        title = f"{title} | RMS = {baseline_rms:.2f}"
     baseline_times = np.asarray(t_us[:baseline_n])
 
     fig = make_subplots(
@@ -990,6 +992,17 @@ def baseline_diagnostic_plot(t_us, waveform, n_baseline, title, bin_size=None):
         row=1,
         col=1,
     )
+    if n_rms is not None:
+        zs_threshold = baseline_mode - n_rms * baseline_rms
+        fig.add_hline(
+            y=zs_threshold,
+            line_dash="dot",
+            line_color="#2a9d8f",
+            annotation_text=f"zero-suppression: mean - {n_rms:g}·RMS = {zs_threshold:.1f}",
+            annotation_position="bottom right",
+            row=1,
+            col=1,
+        )
 
     values, counts = np.unique(distribution_samples, return_counts=True)
     fig.add_trace(
@@ -1162,6 +1175,7 @@ def main():
         st.header("Parameters")
         st.markdown('<hr style="margin: 0.2rem 0;">', unsafe_allow_html=True)
         n_baseline = sidebar_labeled_number_input("N_BASELINE", min_value=100, max_value=n_samples, value=N_BASELINE_DEFAULT, step=100)
+        n_rms = sidebar_labeled_number_input("N_RMS (zero suppression)", min_value=0.0, max_value=100.0, value=3.0, step=0.5)
         n_maw_s1 = sidebar_labeled_number_input("N_MAW_S1", min_value=1, max_value=5000, value=N_MAW_S1_DEFAULT, step=1)
         n_maw_s2 = sidebar_labeled_number_input("N_MAW_S2", min_value=1, max_value=5000, value=N_MAW_S2_DEFAULT, step=1)
         fiber_cutoff_mhz = sidebar_labeled_number_input("FIBER_CUTOFF_FREQ_MHZ", min_value=0.1, max_value=100.0, value=FIBER_CUTOFF_MHZ_DEFAULT, step=0.1)
@@ -1280,7 +1294,7 @@ def main():
 
         t_us = np.arange(n_samples) * float(fiber_samp_wid) * 1e-3
 
-        bsfiber_hg = -(fiber_hg_raw - means(fiber_hg_raw[:, :int(n_baseline)]))
+        bsfiber_hg = subtract_mean_and_zero_suppress(fiber_hg_raw, int(n_baseline), float(n_rms))
         bsfiber_lg = -(fiber_lg_raw - means(fiber_lg_raw[:, :int(n_baseline)]))
 
         fiber_active = np.ones(int(n_fibers), dtype=bool)
@@ -1416,6 +1430,7 @@ def main():
                 int(n_baseline),
                 f"HG baseline diagnostic (mean): channel {fiber_ch}",
                 bin_size=64,
+                n_rms=float(n_rms),
             ),
             use_container_width=True,
         )
@@ -1552,7 +1567,15 @@ def main():
             sipm_cal = calibrate_sipms(detector_db, int(run_number), float(sipm_thr))(
                 sipm_wfs_in_db_order(sipm_wf_evt, sipm_sensors, detector_db, int(run_number))
             )
-            pmap_3d = pmap_builder(cbsfiber_hg_maw, cbsfiber_lg_maw, s1_indices, s2_indices, sipm_cal)
+            # The PMAP builder takes one ID per DB-active fiber, so drop the DB-inactive rows here.
+            db_active_fibers = load_db.DataFiber(detector_db, int(run_number)).Active.values.astype(bool)
+            pmap_3d = pmap_builder(
+                cbsfiber_hg_maw[db_active_fibers],
+                cbsfiber_lg_maw[db_active_fibers],
+                s1_indices,
+                s2_indices,
+                sipm_cal,
+            )
             fig3d, info3d = sophronia_hits_3d_figure(
                 pmap_3d,
                 detector_db,

@@ -19,6 +19,7 @@ This includes a number of tasks:
 import tables as tb
 
 from .. core                   import tbl_functions        as tbl
+from .. database               import load_db
 from .. core.configure         import EventRangeType
 from .. core.configure         import OneOrManyFiles
 from .. io   .run_and_event_io import run_and_event_writer
@@ -33,6 +34,7 @@ from .. dataflow.dataflow   import sink
 
 from .  components import city
 from .  components import fourier_filter
+from .  components import baseline_subtractor_zs
 from .  components import print_every
 from .  components import collect
 from .  components import copy_mc_info
@@ -83,13 +85,13 @@ def irene( files_in        : OneOrManyFiles
 
     #### Define data transformations
 
-    # Raw WaveForm to Corrected WaveForm
+    # Raw WaveForm to Corrected WaveForm (baseline subtraction only)
     fiber_lg_rwf_to_bswf       = fl.map(lambda rwf: -(rwf - means(rwf[:, :n_baseline])),
                               args = "fiber_lg",
                               out  = "bsfiber_lg")
 
-    # Raw WaveForm to Corrected WaveForm
-    fiber_hg_rwf_to_bswf       = fl.map(lambda rwf: -(rwf - means(rwf[:, :n_baseline])),
+    # Raw WaveForm to Corrected WaveForm (baseline from RMS-based zero suppression)
+    fiber_hg_rwf_to_bswf       = fl.map(baseline_subtractor_zs(n_baseline, 5),
                               args = "fiber_hg",
                               out  = "bsfiber_hg")
 
@@ -121,6 +123,12 @@ def irene( files_in        : OneOrManyFiles
     fiber_hg_zero_suppress    = fl.map(zero_suppress_wfs_hg(thr_csum_s1),
                               args = "cbsfiber_hg_sum_maw",
                               out  = "s1_indices")
+
+    # The PMAP builder takes one ID per DB-active fiber, so drop the DB-inactive rows
+    db_active_fibers = load_db.DataFiber(detector_db, run_number).Active.values.astype(bool)
+    select_active_fibers = fl.map(lambda lg, hg: (lg[db_active_fibers], hg[db_active_fibers]),
+                              args = ("cbsfiber_lg_maw", "cbsfiber_hg_maw"),
+                              out  = ("cbsfiber_lg_maw", "cbsfiber_hg_maw"))
 
     # Remove baseline and calibrate SiPMs
     sipm_rwf_to_cal  = fl.map(calibrate_sipms(detector_db, run_number, sipm_thr),
@@ -163,6 +171,7 @@ def irene( files_in        : OneOrManyFiles
                                     bswf_hg_to_cbswf,
                                     fiber_lg_zero_suppress,
                                     fiber_hg_zero_suppress,
+                                    select_active_fibers,
                                     compute_pmaps,
                                     event_count_out.spy,
                                     fl.branch("event_number", evtnum_collect.sink),

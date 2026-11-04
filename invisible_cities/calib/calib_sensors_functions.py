@@ -1,4 +1,5 @@
 import numpy        as np
+import scipy.ndimage as ndimage
 import scipy.signal as signal
 import scipy.stats  as stats
 
@@ -99,6 +100,22 @@ def subtract_baseline_n(wfs, n_baseline):
     Subtract per-sensor mode computed on the first n_baseline samples.
     """
     return wfs - modes(wfs[:, :n_baseline])
+
+
+def subtract_mean_and_zero_suppress(wfs, n_baseline, n_rms, n_pad=3):
+    """
+    Subtract the mean computed on the first n_baseline samples and
+    set to zero the samples below n_rms times the baseline RMS.
+    The samples above threshold are padded by n_pad bins on each side.
+    The sign is inverted so that signals are positive.
+    """
+    baseline = wfs[:, :n_baseline]
+    mu       = means(baseline)
+    rms      = np.sqrt(np.mean((baseline - mu) ** 2, axis=1, keepdims=True))
+    bls      = mu - wfs
+    above    = bls > n_rms * rms
+    padded   = ndimage.maximum_filter1d(above.astype(np.uint8), size=2 * n_pad + 1, axis=1, mode="constant", cval=0) > 0
+    return np.where(padded, bls, 0)
 
 
 def calibrate_wfs(wfs, adc_to_pes):

@@ -885,6 +885,12 @@ def baseline_subtractor(n_baseline):
     return subtract_baseline
 
 
+def baseline_subtractor_zs(n_baseline, n_rms):
+    def subtract_baseline_zs(rwf):
+        return csf.subtract_mean_and_zero_suppress(rwf, n_baseline, n_rms)
+    return subtract_baseline_zs
+
+
 def fourier_filter(samp_wid, cutoff_freq_MHz):
     """
     Returns a function that applies a low-pass filter to waveforms via FFT.
