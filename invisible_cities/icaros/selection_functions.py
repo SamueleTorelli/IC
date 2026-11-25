@@ -32,6 +32,26 @@ def eff_of_selection(df_before  : pd.DataFrame,
 
     return eff
 
+def discard_nan_values(kdst : pd.DataFrame) -> pd.DataFrame :
+
+    """
+    Discard every kdst row that has any NaN value in DT, X or Y.
+    Parameters
+    ----------
+    kdst : pd.DataFrame
+       Dataframe (kdst sophronia output) to clean from NaN values.
+    Returns
+    -------
+    kdst_nan : pd.DataFrame
+       Dataframe with no NaNs
+    """
+
+    kdst = kdst[~(kdst.DT.isna())]
+    kdst = kdst[~(kdst.X.isna())]
+    kdst = kdst[~(kdst.Y.isna())]
+
+    return kdst
+
 
 def select_var_inrange(kdst      : pd.DataFrame,
                        col_name  : str,
@@ -153,7 +173,7 @@ g      Low number of triggered SiPMs
     df, eff_DTrange     = select_var_inrange(df, 'DT', low_DT, high_DT, f'events in DT range [{low_DT}, {high_DT}]')
     df_final, eff_nsipm = select_var_inrange(df,'Nsipm', low_nsipm, high_nsipm, f'events in NSipm range [{low_nsipm}, {high_nsipm}]')
 
-    total_efficiency = eff_of_selection(kdst, df_final, f'total events after all selections')
+    total_efficiency = eff_of_selection(kdst, df_final, 'total events after all selections')
 
     d = {'Diffusion_band': eff_DTband,
          'Xrays': eff_Xrays,

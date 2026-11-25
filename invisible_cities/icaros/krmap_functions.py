@@ -4,6 +4,7 @@ kdsts and merge them to create an 'uniform' map.  It also contains
 functions to get and store map info (metadata) and time evolution.
 """
 import itertools
+import warnings
 
 import pandas as pd
 import numpy  as np
@@ -93,8 +94,6 @@ def create_empty_map(xy_range : tuple,
 def get_median(var : np.ndarray) -> pd.DataFrame:
     """
     Computes the median value of a given variable
-    -We consider that for len(df) < 5, it makes no sense to compute the median or the std.
-    -Kr energy resolution is ~4%, so the std for S2e median would be ~0.04/2.35.
     Parameters
     ----------
     df : pd.DataFrame
@@ -105,12 +104,8 @@ def get_median(var : np.ndarray) -> pd.DataFrame:
       Dataframe containing 'nevents', 'mu', 'sigma', 'mu_error', 'sigma_error'
       of the input dataframe, where mu and mu_error are the median and the median error.
     """
-    if len(var) < 5:
-        sigma = (0.04/2.35)*var.median()
-        mu = np.nan
-    else:
-        sigma = var.std()
-        mu = var.median()
+    mu    = var.median()
+    sigma = var.std()
 
     return pd.DataFrame({'nevents'    : len(var),
                          'mu'         : mu,
@@ -332,7 +327,7 @@ def regularize_map(krmap    : pd.DataFrame,
 
     """
     max_nan_neighbours = 3
-    mu = krmap.mu.values.reshape(mapshape)
+    mu = krmap.mu.values.reshape(mapshape).copy()
 
     for k in range(mu.shape[0]):
         for i in range(1, mu.shape[1] -1):
@@ -545,11 +540,10 @@ def get_time_evol_single_slice(df           : pd.DataFrame,
         f = fit(expo, kdst_in_region.DT, kdst_in_region.S2e, p0)
         magnitudes, uncertainties = f.values, (f[2][0], f[2][1])
 
-        lifetime  = - magnitudes[1]
-        ulifetime = uncertainties[1]
+        e0 ,  lifetime = magnitudes
+        e0u, ulifetime = uncertainties
 
-        e0  = magnitudes[0]
-        e0u = uncertainties[0]
+        lifetime = -lifetime
 
     except:
         lifetime  = np.nan
@@ -561,19 +555,15 @@ def get_time_evol_single_slice(df           : pd.DataFrame,
     dv, udv = compute_drift_v(kdst_in_region.DT.to_numpy(), dtbins_dv, seed = None)
 
     try:
-        f                = quick_gauss_fit(df['Ec'].values, bins_Ec, sigma = error)
-        _, mu, sigma     = f.values
-        _, u_mu, u_sigma = f.errors
-
-        chi2_ec_prelim   = f.chi2
+        f              = quick_gauss_fit(df['Ec'].values, bins_Ec, sigma = error)
+        _,   mu, _     = f.values
+        _, u_mu, _     = f.errors
+        chi2_ec_prelim = f.chi2
 
     except:
         median         = get_median(df['Ec'])
         mu             = median.mu
-        sigma          = median.sigma
         u_mu           = median.mu_error
-        u_sigma        = median.sigma_error
-
         chi2_ec_prelim = np.nan
 
     try:
@@ -717,11 +707,29 @@ def save_map(name          : str,
     -------
     Hdf file containing in each node each one of the inputs.
     """
-    #special case, mode = 'w' because if you process the same data twice and mode = 'a'
-    #the map would be duplicated.
-    metadata.to_hdf(name, key = 'metadata', mode = 'w')
+    # Special case, mode = 'w' because if you process the same data twice and mode = 'a'
+    # the map would be duplicated.
+    #
+    # Metadata intentionally mixes scalar and list-valued entries. Pandas must
+    # pickle this small heterogeneous object column in the fixed-format HDF5
+    # store, so silence the corresponding performance warning here.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category = pd.errors.PerformanceWarning)
+        metadata.to_hdf(name, key = 'metadata', mode = 'w')
 
     with tb.open_file(name, "a") as file:
         df_writer(file, efficiencies, group_name = 'data', table_name = 'selection_efficiencies')
         df_writer(file, krmap, group_name = 'krmap', table_name = 'krmap')
         df_writer(file, t_evol, group_name = 't_evol', table_name = 't_evol')
+
+def merge_multiple_maps(maps : pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge multiple maps into a single map.
+    Group maps by their (k i j) indices. The output 'mu' (new_mu) is computed as the weighted mean of the input 'mu' values using 'nevents' as weights.
+    """
+    def merge_bins(df):
+        new_mu  = np.sum(df.mu * df.nevents) / np.clip(df.nevents.sum(), 1, None)
+        return pd.DataFrame( dict( mu = new_mu
+                                 , nevents  = df.nevents.sum())
+                                 , index=[0])
+    return maps.groupby('k i j'.split()).apply(merge_bins).reset_index()

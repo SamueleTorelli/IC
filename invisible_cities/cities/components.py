@@ -27,6 +27,8 @@ import pandas as pd
 import warnings
 import math
 import os
+import subprocess
+import traceback
 
 from .. dataflow                  import                  dataflow as  fl
 from .. dataflow.dataflow         import                      sink
@@ -79,7 +81,6 @@ from .. io     .dst_io            import                 df_writer
 from .. types  .ic_types          import                  NoneType
 from .. types  .ic_types          import                        xy
 from .. types  .ic_types          import                        NN
-from .. types  .ic_types          import                       NNN
 from .. types  .ic_types          import                    minmax
 from .. types  .ic_types          import        types_dict_summary
 from .. types  .ic_types          import         types_dict_tracks
@@ -149,8 +150,14 @@ def city(city_function):
         args   = vars(conf)
         result = check_annotations(city_function)(**args)
         if os.path.exists(conf.file_out):
-            write_city_configuration(conf.file_out, city_function.__name__, args)
-            copy_cities_configuration(conf.files_in[0], conf.file_out)
+            git_info = fetch_git_info()
+            write_city_configuration(conf.file_out, city_function.__name__, {**args, **git_info})
+
+            # Irene on data runs over the decoder output, which does not produce
+            # a config node. In that case, the warning is noise rather than
+            # useful information.
+            warn = city_function.__name__ != "irene" or conf.run_number <= 0
+            copy_cities_configuration(conf.files_in[0], conf.file_out, warn)
             index_tables(conf.file_out)
         return result
     return proxy
@@ -202,6 +209,45 @@ def create_timestamp(rate: float) -> float:
         return timestamp
 
     return create_timestamp_
+
+
+def run_git_command(git_command: str, quiet: bool = False):
+    """
+    Runs a git command and stores the output.
+
+    Parameters
+    ----------
+    git_command : the standard terminal git command the user would input
+    quiet       : if True, suppress error messages on failure
+
+    Returns
+    -------
+    git_output  : the standard git terminal output
+    """
+    try:
+        git_output = subprocess.run(git_command.split(),
+                                    text=True,
+                                    capture_output=True,
+                                    check=True,
+                                    cwd=os.getenv("ICTDIR")).stdout.strip()
+        return git_output
+    except subprocess.CalledProcessError as e:
+        if not quiet:
+            print(f"Following error encountered when running: {git_command}")
+            print(e.stderr)
+        return "None"
+    except Exception:
+        print(traceback.format_exc())
+
+
+def fetch_git_info():
+    git_info = dict(
+        IC_tag         = run_git_command("git describe --tags --exact-match", quiet=True),
+        closest_IC_tag = run_git_command("git describe --tags"),
+        branch_name    = run_git_command("git branch --show-current"),
+        commit_hash    = run_git_command("git rev-parse HEAD")
+    )
+    return git_info
 
 
 def index_tables(file_out):
@@ -257,10 +303,11 @@ def write_city_configuration( filename : str
         df_writer(file, df, "config", city_name, f"configuration for {city_name}", str_col_length=300)
 
 
-def copy_cities_configuration( file_in : str, file_out : str):
+def copy_cities_configuration(file_in : str, file_out : str, warn: bool = True):
     with tb.open_file(file_in, "r") as fin:
         if "config" not in fin.root:
-            warnings.warn("Input file does not contain /config group", UserWarning)
+            if warn:
+                warnings.warn("Input file does not contain /config group", UserWarning)
             return
 
         with tb.open_file(file_out, "a") as fout:
@@ -764,7 +811,7 @@ def sensor_data(path, wf_type):
 
 def build_pmap(detector_db, run_number, pmt_samp_wid, sipm_samp_wid,
                s1_lmax, s1_lmin, s1_rebin_stride, s1_stride, s1_tmax, s1_tmin,
-               s2_lmax, s2_lmin, s2_rebin_stride, s2_stride, s2_tmax, s2_tmin, 
+               s2_lmax, s2_lmin, s2_rebin_stride, s2_stride, s2_tmax, s2_tmin,
                sipm_selection_algo):
     s1_params = dict(time        = minmax(min = s1_tmin,
                                           max = s1_tmax),
@@ -836,8 +883,8 @@ def threshold_sipm_selection( thr_sipm_type
                             , detector_db = None):
     '''
     Applies energy thresholds to SiPM S2 waveforms:
-    - thr_sipm:    applied per time bin. Waveform samples below this 
-                   threshold are set to zero.  
+    - thr_sipm:    applied per time bin. Waveform samples below this
+                   threshold are set to zero.
     - thr_sipm_s2: applied to the integrated waveform charge. If the total
                    charge is below this threshold, it is set to zero.
     '''
@@ -859,13 +906,13 @@ def pyrrha_sipm_selection( selection_method     : SiPMSelectionMethod
                          , run_number          : int
                          , detector_db         : str):
     '''
-    Applies a generic selection function to the sipms, which can be used to 
+    Applies a generic selection function to the sipms, which can be used to
     implement a spatial SiPM selection method (called Pyrrha).
     '''
     def pyrrha_sipm_selection(wfs):
-        return wfm.spatial_selection_method(wfs, 
-                                            selection_method, 
-                                            selection_kwargs, 
+        return wfm.spatial_selection_method(wfs,
+                                            selection_method,
+                                            selection_kwargs,
                                             proximity_threshold,
                                             padding_radius,
                                             run_number,
@@ -876,7 +923,7 @@ def pyrrha_sipm_selection( selection_method     : SiPMSelectionMethod
 
 def no_cut_sipm_selection():
     """"
-    Function that applies no cuts to the SiPM waveforms. 
+    Function that applies no cuts to the SiPM waveforms.
     """
     def no_cut_sipm_selection(wfs):
         sipm_ids = np.arange(wfs.shape[0])
@@ -1001,7 +1048,7 @@ def build_pointlike_event(dbfile, run_number, drift_v,
             try:
                 clusters = reco(xys, qs)
             except XYRecoFail:
-                c    = NNN()
+                c    = Cluster.empty()
                 Z    = tuple(NN for _ in range(0, evt.nS1))
                 DT   = tuple(NN for _ in range(0, evt.nS1))
                 Zrms = NN
@@ -1311,7 +1358,7 @@ def compute_and_write_pmaps(detector_db, run_number, pmt_samp_wid, sipm_samp_wid
     # Build the PMap
     compute_pmap     = fl.map(build_pmap(detector_db, run_number, pmt_samp_wid, sipm_samp_wid,
                                          s1_lmax, s1_lmin, s1_rebin_stride, s1_stride, s1_tmax, s1_tmin,
-                                         s2_lmax, s2_lmin, s2_rebin_stride, s2_stride, s2_tmax, s2_tmin, 
+                                         s2_lmax, s2_lmin, s2_rebin_stride, s2_stride, s2_tmax, s2_tmin,
                                          sipm_selection_algo),
                               args = ("ccwfs", "s1_indices", "s2_indices", "sipm"),
                               out  = "pmap")
@@ -1563,7 +1610,7 @@ def track_blob_info_creator_extractor(vox_size         : Tuple[float, float, flo
         hits = hits.assign(track_id=-1)
         if len(hits) > max_num_hits:
             event = hits.event.iloc[0]
-            warn("Event {event} has too many hits ({len(hits)})."
+            warn(f"Event {event} has too many hits ({len(hits)})."
                  " This event will not be processed.")
             return df, hits, True
         plf.round_hits_positions_in_place(hits, 5)

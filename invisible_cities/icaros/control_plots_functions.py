@@ -20,7 +20,6 @@ from .. types  .symbols                   import SelRegionMethod
 from .. icaros .lifetime_vdrift_functions import select_lifetime_region
 
 from typing import Callable
-from typing import Tuple
 
 matplotlib.set_loglevel("warning")
 
@@ -330,26 +329,26 @@ def monitor_dtime(df          : pd.DataFrame,
     axs[0,0].plot(df1.DT, dtrms2_low(df1.DT), ".r", ms=2);
     axs[0,0].plot(df1.DT, dtrms2_upp(df1.DT), ".r", ms=2);
     axs[0,0].plot(df1.DT, dtrms2_cen(df1.DT), '.g', ms = 2);
-    axs[0,0].set_xlabel("Drift time ($\mu$s)"); axs[0,0].set_ylabel("DT$_{rms}^2$ ($\mu$s)"); axs[0,0].set_xlim(0, 1300)
+    axs[0,0].set_xlabel(r"Drift time ($\mu$s)"); axs[0,0].set_ylabel(r"DT$_{rms}^2$ ($\mu$s)"); axs[0,0].set_xlim(0, 1300)
     axs[0, 0].set_title('Before selection')
 
     axs[0,1].hist2d(df2.DT, df2.Zrms**2, (dtbins, dtrms2bins));
     axs[0,1].plot(df2.DT, dtrms2_low(df2.DT), ".r", ms=2);
     axs[0,1].plot(df2.DT, dtrms2_upp(df2.DT), ".r", ms=2);
     axs[0,1].plot(df2.DT, dtrms2_cen(df2.DT), '.g', ms = 2);
-    axs[0,1].set_xlabel("Drift time ($\mu$s)"); axs[0,1].set_ylabel("DT$_{rms}^2$ ($\mu$s)"); axs[0,1].set_xlim(0, 1300)
+    axs[0,1].set_xlabel(r"Drift time ($\mu$s)"); axs[0,1].set_ylabel(r"DT$_{rms}^2$ ($\mu$s)"); axs[0,1].set_xlim(0, 1300)
     axs[0,1].set_title('After selection')
 
     axs[1,0].hist(df1_.DT, dtbins, histtype = 'step', color = 'mediumpurple',lw = 2, label = 'before selection');
     axs[1,0].hist(df2.DT, dtbins, histtype = 'step', color = 'black', lw = 2, label = 'after selection');
     axs[1,0].legend();
-    axs[1,0].set_xlabel("Drift time ($\mu$s)");
+    axs[1,0].set_xlabel(r"Drift time ($\mu$s)");
     axs[1,0].grid(True)
 
-    axs[1,1].hist(df1_.Zrms**2, 100, (0, 40), histtype = 'step',color = 'mediumpurple',lw = 2, label = 'before selection');
-    axs[1,1].hist(df2.Zrms**2, 100, (0, 40), histtype = 'step', color = 'black',lw = 2, label = 'after selection');
+    axs[1,1].hist(df1_.Zrms**2, bins = 100, range = (0, 40), histtype = 'step',color = 'mediumpurple',lw = 2, label = 'before selection');
+    axs[1,1].hist(df2.Zrms**2, bins = 100, range = (0, 40), histtype = 'step', color = 'black',lw = 2, label = 'after selection');
     axs[1,1].legend();
-    axs[1,1].set_xlabel("DT$_{rms}^2$ ($\mu$s)");
+    axs[1,1].set_xlabel(r"DT$_{rms}^2$ ($\mu$s)");
     axs[1,1].grid(True)
 
     fig.tight_layout();
@@ -370,13 +369,17 @@ def monitor_lifetime(df        : pd.DataFrame,
 
 
 def monitor_kr_distribution(df        : pd.DataFrame,
+                            high_S2e  : float,
+                            low_S2e   : float,
+                            high_DT   : float,
+                            low_DT    : float,
                             bins      : int,
                             dtr2_bins : tuple):
     """
     Plots the square radial distribution and a 2D distribution of the
     square radius as a function of drift time.
     """
-    sel = in_range(df.S2e, 7.5e3, 9.5e3) & in_range(df.DT, 20, 1350)
+    sel = in_range(df.S2e, low_S2e, high_S2e) & in_range(df.DT, low_DT, high_DT)
 
     DT = (df.DT[sel]).dropna()
     R2 = (df.X[sel]**2 + df.Y[sel]**2).dropna()
@@ -384,12 +387,12 @@ def monitor_kr_distribution(df        : pd.DataFrame,
     fig, axs = plt.subplots(1, 2, figsize = (21, 7))
 
     axs[0].hist(R2, bins, histtype = 'step', color = 'mediumpurple', lw = 2);
-    axs[0].set_xlabel("R$^2$ (mm$^2$)"); freq();
+    axs[0].set_xlabel(r"R$^2$ (mm$^2$)"); freq();
     axs[0].grid(True)
 
     axs[1].hist2d(DT, R2, dtr2_bins);
-    axs[1].set_xlabel("DT ($\mu$s)");
-    axs[1].set_ylabel("R$^2$ (mm$^2$)");
+    axs[1].set_xlabel(r"DT ($\mu$s)");
+    axs[1].set_ylabel(r"R$^2$ (mm$^2$)");
 
 
 def hist2D(df        : pd.DataFrame,
@@ -465,14 +468,14 @@ def plot_Ec(Ec   : pd.core.series.Series,
              label = f'mean Ec: {mean_Ec:.2f}keV\n'
              f'median Ec: {median_Ec:.2f}keV\n'
              f'std Ec: {stdEc:.2f}keV\n'
-             f'umean Ec: {umeanEc:.2f}keV'
+             f'umean Ec: {umeanEc:.4f}keV'
              )
 
     axs.hist(Ec_2, 100, range = (25, 60), histtype = 'step', color = 'mediumpurple',lw = 2,
              label = f'mean Ec_2: {mean_Ec2:.2f}keV\n'
              f'median Ec_2: {median_Ec2:.2f}keV\n'
              f'std Ec_2: {stdEc2:.2f}keV\n'
-             f'umean Ec_2: {umeanEc2:.2f}keV'
+             f'umean Ec_2: {umeanEc2:.4f}keV'
              )
     axs.set_xlabel('Ec (keV)'); freq();
     axs.grid()
@@ -516,7 +519,7 @@ def plot_lifetime_fit(df         : pd.DataFrame,
                     f'u_lifetime : {uncertainties[1]:.2f}'
              )
     axs.errorbar(dt, e, yerr = se, fmt = '.');
-    axs.set_ylim(6000, 10000);
+    #axs.set_ylim(6000, 14000);
     axs.legend();
 
 
@@ -538,7 +541,7 @@ def plot_sigmoid(df         : pd.DataFrame,
 
     fig, axs = plt.subplots(1, 1)
     axs.plot(bin_centers, counts, 'o', color = 'black', markersize = 5, label = 'DT mean')
-    axs.plot(bin_centers, sigmoid(bin_centers, *f.values), color = 'red', label = f'Sigmoid_fit')
+    axs.plot(bin_centers, sigmoid(bin_centers, *f.values), color = 'red', label = 'Sigmoid_fit')
     axs.set_xlabel(r'DT($\mu$s)');
     axs.set_ylabel('Event distribution');
     axs.set_xlim(1200, 1500);
@@ -592,7 +595,7 @@ def plot_efficiencies(efficiencies : pd.DataFrame):
     for i in range(ncuts):
         plt.scatter(efficiencies.columns[i], efficiencies_plot[i],
                     marker = 'x', color = colors[i], lw = 2,
-                    s = 100, label = f'{efficiencies.columns[i]}: {efficiencies_plot[i]:.2f}')
+                    s = 100, label = f'{efficiencies.columns[i]}: {efficiencies_plot[i]:.3f}')
     plt.xticks(rotation=20, ha='right')
     plt.grid()
     plt.legend()
@@ -615,7 +618,7 @@ def plot_time_evolution_with_errors_and_dates(df_time_evolution : pd.DataFrame,
                            that contains the timestamp data in seconds since epoch.
         output_dir (str, optional): Directory to save plots. If None, plots are displayed.
     """
-    print(f"\n--- Processing /time_evolution data ---")
+    print("\n--- Processing /time_evolution data ---")
     ts_col_name = 'ts'
 
     try:
@@ -689,14 +692,17 @@ def plot_time_evolution_with_errors_and_dates(df_time_evolution : pd.DataFrame,
 
             if output_dir:
                 plot_filename = os.path.join(output_dir, f"time_evolution_{plot_name}_with_errors_dates.png")
-                plt.savefig(plot_filename)
-                print(f"Saved plot for {plot_name} to {plot_filename}")
-                plt.close() # Close the plot to free memory
+                try:
+                    plt.savefig(plot_filename)
+                except Exception as error:
+                    print(f"Error trying to write {plot_filename}: {error}")
+                else:
+                    print(f"Saved plot for {plot_name} to {plot_filename}")
+                finally:
+                    plt.close() # Close the plot to free memory
             else:
                 plt.show()
 
-    except FileNotFoundError:
-        print(f"Error: The HDF5 file '{h5_file_path}' was not found. Please check the path.")
     except KeyError as ke:
         print(f"Error accessing HDF5 group or column: {ke}. Please ensure the '/time_evolution' group and the 'ts' column name are correct.")
     except Exception as e:
@@ -722,6 +728,10 @@ def make_control_plots(df               : pd.DataFrame,
                        dtrms2_upp       : Callable,
                        dtrms2_cen       : Callable,
                        dtbins2          : np.array,
+                       high_S2e         : float,
+                       low_S2e          : float,
+                       high_DT          : float,
+                       low_DT           : float,
                        bins             : int,
                        dtr2_bins        : tuple,
                        statistic        : str,
@@ -749,7 +759,7 @@ def make_control_plots(df               : pd.DataFrame,
     plt.gcf().savefig(f"{plots_out}/monitor_lifetime_run{run_number}.png")
     plt.close()
 
-    monitor_kr_distribution(df, bins, dtr2_bins)
+    monitor_kr_distribution(df, high_S2e, low_S2e, high_DT, low_DT,  bins, dtr2_bins)
     plt.gcf().savefig(f"{plots_out}/monitor_kr_distribution_run{run_number}.png")
     plt.close()
 
